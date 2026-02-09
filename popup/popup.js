@@ -36,6 +36,13 @@ const clearBtn = document.getElementById('clear-btn');
 const validateBtn = document.getElementById('validate-btn');
 const validateSection = document.getElementById('validate-section');
 const validateText = document.getElementById('validate-text');
+const selectAllCb = document.getElementById('select-all-cb');
+const statusFilter = document.getElementById('status-filter');
+
+// 筛选与选择状态
+let currentFilter = 'all';
+let selectedIds = new Set();
+let currentHistory = [];
 
 // Gmail 配置元素
 const gmailAddressInput = document.getElementById('gmail-address');
@@ -187,50 +194,108 @@ function renderSessions(sessions) {
 }
 
 /**
+ * 获取条目的筛选状态键
+ */
+function getItemFilterKey(item) {
+  if (!item.success) return 'failed';
+  return item.tokenStatus || 'unknown';
+}
+
+/**
+ * 根据当前筛选条件过滤历史记录
+ */
+function filterHistory(history) {
+  if (currentFilter === 'all') return history;
+  return history.filter(item => getItemFilterKey(item) === currentFilter);
+}
+
+/**
+ * 获取当前被勾选且可见的记录 ID 列表
+ */
+function getSelectedIds() {
+  return [...selectedIds];
+}
+
+/**
+ * 更新全选复选框状态
+ */
+function updateSelectAllState() {
+  const filtered = filterHistory(currentHistory);
+  if (filtered.length === 0) {
+    selectAllCb.checked = false;
+    selectAllCb.indeterminate = false;
+    return;
+  }
+  const allSelected = filtered.every(item => selectedIds.has(String(item.id)));
+  const someSelected = filtered.some(item => selectedIds.has(String(item.id)));
+  selectAllCb.checked = allSelected;
+  selectAllCb.indeterminate = !allSelected && someSelected;
+}
+
+/**
  * 渲染历史记录
  */
 function renderHistory(history) {
-  if (!history || history.length === 0) {
+  currentHistory = history || [];
+
+  const filtered = filterHistory(currentHistory);
+
+  if (!currentHistory || currentHistory.length === 0) {
     historyList.innerHTML = '<div class="history-empty">暂无记录</div>';
+    updateSelectAllState();
     return;
   }
 
-  historyList.innerHTML = history.slice(0, 20).map(item => {
-    // 确定状态类
-    let statusClass = item.success ? 'success' : 'failed';
-    if (item.success && item.tokenStatus) {
-      const statusClassMap = {
-        valid: 'success',
-        suspended: 'suspended',
-        expired: 'expired',
-        invalid: 'invalid',
-        error: 'error',
-        unknown: 'unknown'
-      };
-      statusClass = statusClassMap[item.tokenStatus] || 'unknown';
+  if (filtered.length === 0) {
+    historyList.innerHTML = '<div class="history-empty">无匹配记录</div>';
+    updateSelectAllState();
+    return;
+  }
+
+  const headerRow = `
+    <div class="history-header-row">
+      <span class="history-col-cb"></span>
+      <span class="history-col-email">邮箱</span>
+      <span class="history-col-status">状态</span>
+      <span class="history-col-time">注册时间</span>
+      <span class="history-col-actions">操作</span>
+    </div>
+  `;
+
+  const rows = filtered.map(item => {
+    // Token 状态徽章
+    const badgeLabels = {
+      valid: '有效',
+      suspended: '封禁',
+      expired: '过期',
+      invalid: '无效',
+      error: '错误',
+      unknown: '未验证'
+    };
+
+    let statusLabel = '';
+    let statusClass = '';
+    if (!item.success) {
+      statusLabel = '<span class="token-badge failed">失败</span>';
+      statusClass = 'failed';
+    } else if (item.tokenStatus && badgeLabels[item.tokenStatus]) {
+      statusLabel = `<span class="token-badge ${item.tokenStatus}">${badgeLabels[item.tokenStatus]}</span>`;
+      statusClass = item.tokenStatus;
+    } else {
+      statusLabel = '<span class="token-badge unknown">未验证</span>';
+      statusClass = 'unknown';
     }
 
-    // Token 状态徽章
-    let tokenBadge = '';
-    if (item.success && item.tokenStatus) {
-      const badgeLabels = {
-        valid: '有效',
-        suspended: '封禁',
-        expired: '过期',
-        invalid: '无效',
-        error: '错误',
-        unknown: '未验证'
-      };
-      tokenBadge = `<span class="token-badge ${item.tokenStatus}">${badgeLabels[item.tokenStatus] || item.tokenStatus}</span>`;
-    }
+    const checked = selectedIds.has(String(item.id)) ? 'checked' : '';
 
     return `
     <div class="history-item" data-id="${item.id}">
-      <div class="history-status ${statusClass}"></div>
+      <input type="checkbox" class="history-item-cb" data-id="${item.id}" ${checked}>
       <div class="history-info">
-        <div class="history-email">${item.email || '-'}${tokenBadge}</div>
-        <div class="history-time">${item.time || ''}</div>
+        <div class="history-email">${item.email || '-'}</div>
       </div>
+      <div class="history-token-status">${statusLabel}</div>
+      <div class="history-time">${item.time || ''}</div>
       <div class="history-actions">
         ${item.success && item.token ? `<button class="kiro-btn" data-id="${item.id}" title="同步至 Kiro IDE">Kiro</button>` : ''}
         <button class="copy-btn-record" data-id="${item.id}">复制</button>
@@ -238,11 +303,27 @@ function renderHistory(history) {
     </div>
   `;
   }).join('');
+
+  historyList.innerHTML = headerRow + rows;
+
+  updateSelectAllState();
 }
 
-// 事件委托：处理历史记录按钮点击
+// 事件委托：处理历史记录按钮和复选框点击
 historyList.addEventListener('click', async (e) => {
   const target = e.target;
+
+  // 单个复选框
+  if (target.classList.contains('history-item-cb')) {
+    const id = target.getAttribute('data-id');
+    if (target.checked) {
+      selectedIds.add(id);
+    } else {
+      selectedIds.delete(id);
+    }
+    updateSelectAllState();
+    return;
+  }
 
   // Kiro 同步按钮
   if (target.classList.contains('kiro-btn')) {
@@ -480,21 +561,22 @@ async function reset() {
 }
 
 /**
- * 导出历史 (JSON) - 只导出有效的 Token
+ * 导出历史 (JSON) - 按 Kiro 账号格式导出勾选的有效 Token
  */
 async function exportHistory() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
-    const history = response.history || [];
-
-    if (history.length === 0) {
-      alert('暂无记录');
+    const selected = getSelectedIds();
+    if (selected.length === 0) {
+      alert('请先勾选要导出的账号');
       return;
     }
 
-    // 只导出成功且 token 状态是 valid 或 unknown（未验证）的记录
-    // 过滤掉: suspended, expired, invalid, error
+    const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
+    const history = response.history || [];
+
+    // 只导出勾选的、成功且 token 状态是 valid 或 unknown（未验证）的记录
     const validRecords = history.filter(r =>
+      selected.includes(String(r.id)) &&
       r.success &&
       r.token &&
       r.tokenStatus !== 'suspended' &&
@@ -504,17 +586,50 @@ async function exportHistory() {
     );
 
     if (validRecords.length === 0) {
-      alert('没有有效的注册记录（可能全部被封禁、过期或无效）');
+      alert('勾选的账号中没有有效的注册记录（可能全部被封禁、过期或无效）');
       return;
     }
 
-    // 生成 JSON 格式（与原项目一致，只包含 Token 信息）
-    const jsonData = validRecords.map(r => ({
-      clientId: r.token?.clientId || '',
-      clientSecret: r.token?.clientSecret || '',
-      accessToken: r.token?.accessToken || '',
-      refreshToken: r.token?.refreshToken || ''
-    }));
+    // 生成 Kiro 账号 JSON 格式
+    const now = Date.now();
+    const accounts = validRecords.map(r => {
+      const emailPrefix = (r.email || '').split('@')[0] || '';
+      return {
+        email: r.email || '',
+        userId: '',
+        nickname: emailPrefix,
+        idp: 'BuilderId',
+        credentials: {
+          accessToken: r.token?.accessToken || '',
+          csrfToken: '',
+          refreshToken: r.token?.refreshToken || '',
+          clientId: r.token?.clientId || '',
+          clientSecret: r.token?.clientSecret || '',
+          region: 'us-east-1',
+          expiresAt: now + 3600 * 1000,
+          authMethod: 'IdC',
+          provider: 'BuilderId'
+        },
+        subscription: {
+          type: 'Free',
+          title: 'KIRO FREE',
+          rawType: 'Q_DEVELOPER_STANDALONE_FREE'
+        },
+        usage: {},
+        tags: [],
+        status: 'active',
+        id: `${r.email}-${r.id}`,
+        createdAt: typeof r.id === 'number' ? Math.floor(r.id) : now
+      };
+    });
+
+    const jsonData = {
+      version: '1.3.2',
+      exportedAt: now,
+      accounts: accounts,
+      groups: [],
+      tags: []
+    };
 
     const jsonStr = JSON.stringify(jsonData, null, 2);
 
@@ -523,14 +638,14 @@ async function exportHistory() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `accounts-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `kiro-accounts-${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(url);
 
     // 提示导出数量
-    const totalSuccess = history.filter(r => r.success && r.token).length;
-    if (validRecords.length < totalSuccess) {
-      alert(`已导出 ${validRecords.length} 个有效账号（共 ${totalSuccess} 个成功注册，${totalSuccess - validRecords.length} 个被过滤）`);
+    const totalSelected = history.filter(r => selected.includes(String(r.id)) && r.success && r.token).length;
+    if (validRecords.length < totalSelected) {
+      alert(`已导出 ${validRecords.length} 个有效账号（勾选 ${totalSelected} 个，${totalSelected - validRecords.length} 个被过滤）`);
     }
 
   } catch (error) {
@@ -539,21 +654,29 @@ async function exportHistory() {
 }
 
 /**
- * 导出为 CSV（完整信息，包含 Token 状态）
+ * 导出为 CSV（勾选的账号，完整信息，包含 Token 状态）
  */
 async function exportHistoryCSV() {
   try {
+    const selected = getSelectedIds();
+    if (selected.length === 0) {
+      alert('请先勾选要导出的账号');
+      return;
+    }
+
     const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
     const history = response.history || [];
 
-    if (history.length === 0) {
-      alert('暂无记录');
+    const selectedRecords = history.filter(r => selected.includes(String(r.id)));
+
+    if (selectedRecords.length === 0) {
+      alert('未找到勾选的记录');
       return;
     }
 
     // CSV 格式（添加 token_status 字段）
     const headers = ['email', 'password', 'first_name', 'last_name', 'client_id', 'client_secret', 'access_token', 'refresh_token', 'success', 'token_status', 'error'];
-    const rows = history.map(r => [
+    const rows = selectedRecords.map(r => [
       r.email || '',
       r.password || '',
       r.firstName || '',
@@ -583,29 +706,47 @@ async function exportHistoryCSV() {
 }
 
 /**
- * 清空历史
+ * 删除勾选的历史记录
  */
 async function clearHistory() {
-  if (!confirm('确定要清空所有历史记录吗？')) {
+  const selected = getSelectedIds();
+  if (selected.length === 0) {
+    alert('请先勾选要删除的账号');
+    return;
+  }
+
+  if (!confirm(`确定要删除勾选的 ${selected.length} 条记录吗？`)) {
     return;
   }
 
   try {
-    await chrome.runtime.sendMessage({ type: 'CLEAR_HISTORY' });
-    renderHistory([]);
+    await chrome.runtime.sendMessage({ type: 'DELETE_HISTORY_ITEMS', selectedIds: selected });
+    // 从选中集合中移除已删除的
+    selected.forEach(id => selectedIds.delete(id));
+    // 刷新状态
+    const response = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+    if (response?.state) {
+      updateUI(response.state);
+    }
   } catch (error) {
-    console.error('[Popup] 清空错误:', error);
+    console.error('[Popup] 删除错误:', error);
   }
 }
 
 /**
- * 验证所有 Token
+ * 验证勾选的 Token
  */
 async function validateAllTokens() {
+  const selected = getSelectedIds();
+  if (selected.length === 0) {
+    alert('请先勾选要验证的账号');
+    return;
+  }
+
   validateBtn.disabled = true;
   validateSection.style.display = 'block';
   validateSection.classList.remove('validate-result');
-  validateText.textContent = '正在验证所有 Token (0/0)...';
+  validateText.textContent = '正在验证勾选的 Token (0/0)...';
 
   try {
     // 监听验证进度
@@ -617,7 +758,7 @@ async function validateAllTokens() {
     };
     chrome.runtime.onMessage.addListener(progressListener);
 
-    const response = await chrome.runtime.sendMessage({ type: 'VALIDATE_ALL_TOKENS' });
+    const response = await chrome.runtime.sendMessage({ type: 'VALIDATE_ALL_TOKENS', selectedIds: selected });
     console.log('[Popup] 验证结果:', response);
 
     // 移除进度监听器
@@ -1010,6 +1151,22 @@ async function init() {
     if (message.type === 'STATE_UPDATE') {
       updateUI(message.state);
     }
+  });
+
+  // 筛选和全选事件
+  statusFilter.addEventListener('change', () => {
+    currentFilter = statusFilter.value;
+    renderHistory(currentHistory);
+  });
+
+  selectAllCb.addEventListener('change', () => {
+    const filtered = filterHistory(currentHistory);
+    if (selectAllCb.checked) {
+      filtered.forEach(item => selectedIds.add(String(item.id)));
+    } else {
+      filtered.forEach(item => selectedIds.delete(String(item.id)));
+    }
+    renderHistory(currentHistory);
   });
 
   // 绑定按钮事件

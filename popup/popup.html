@@ -132,11 +132,27 @@
       <div class="section-header">
         <h2>注册历史</h2>
         <div class="section-actions">
-          <button id="validate-btn" class="btn-small btn-small-primary" title="验证所有 Token 状态">验证</button>
-          <button id="export-btn" class="btn-small" title="导出有效 Token (JSON)">JSON</button>
-          <button id="export-csv-btn" class="btn-small" title="导出完整信息 (CSV)">CSV</button>
-          <button id="clear-btn" class="btn-small btn-small-danger">清空</button>
+          <button id="validate-btn" class="btn-small btn-small-primary" title="验证勾选的 Token 状态">验证</button>
+          <button id="export-btn" class="btn-small" title="导出勾选的 Token (JSON)">JSON</button>
+          <button id="export-csv-btn" class="btn-small" title="导出勾选的信息 (CSV)">CSV</button>
+          <button id="clear-btn" class="btn-small btn-small-danger">删除</button>
         </div>
+      </div>
+      <div class="history-toolbar">
+        <label class="select-all-label">
+          <input type="checkbox" id="select-all-cb">
+          <span>全选</span>
+        </label>
+        <select id="status-filter" class="status-filter">
+          <option value="all">全部状态</option>
+          <option value="valid">有效</option>
+          <option value="suspended">封禁</option>
+          <option value="expired">过期</option>
+          <option value="invalid">无效</option>
+          <option value="error">错误</option>
+          <option value="unknown">未验证</option>
+          <option value="failed">失败</option>
+        </select>
       </div>
       <div id="history-list" class="history-list">
         <div class="history-empty">暂无记录</div>

@@ -483,9 +483,10 @@ function saveToHistory(session, success) {
 }
 
 /**
- * 批量验证所有 Token（并发执行，带进度）
+ * 批量验证 Token（并发执行，带进度）
+ * @param {string[]} [selectedIds] - 可选，只验证指定 ID 的记录
  */
-async function validateAllTokens() {
+async function validateAllTokens(selectedIds) {
   const results = {
     total: 0,
     valid: 0,
@@ -496,7 +497,10 @@ async function validateAllTokens() {
     details: []
   };
 
-  const recordsToValidate = registrationHistory.filter(r => r.success && r.token?.refreshToken);
+  let recordsToValidate = registrationHistory.filter(r => r.success && r.token?.refreshToken);
+  if (selectedIds && selectedIds.length > 0) {
+    recordsToValidate = recordsToValidate.filter(r => selectedIds.includes(String(r.id)));
+  }
   results.total = recordsToValidate.length;
 
   if (results.total === 0) {
@@ -944,6 +948,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true });
       break;
 
+    case 'DELETE_HISTORY_ITEMS':
+      if (message.selectedIds && message.selectedIds.length > 0) {
+        registrationHistory = registrationHistory.filter(
+          r => !message.selectedIds.includes(String(r.id))
+        );
+        chrome.storage.local.set({ registrationHistory });
+        broadcastState();
+      }
+      sendResponse({ success: true });
+      break;
+
     case 'EXPORT_HISTORY':
       sendResponse({ history: registrationHistory });
       break;
@@ -959,8 +974,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
 
     case 'VALIDATE_ALL_TOKENS':
-      // 批量验证所有 Token
-      validateAllTokens().then(sendResponse);
+      // 批量验证 Token（支持按勾选 ID 过滤）
+      validateAllTokens(message.selectedIds).then(sendResponse);
       return true;
 
     case 'GET_VALID_HISTORY':
