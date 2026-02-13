@@ -134,13 +134,20 @@ function parseProxyList(raw) {
 }
 
 /**
- * 获取下一个轮换代理
+ * 获取下一个轮换代理（跳过已标记不可用的）
+ * @param {Set} deadSet - 已标记不可用的代理 key 集合
  */
-function getNextProxy() {
+function getNextProxy(deadSet) {
   if (proxyManualList.length === 0) return null;
-  const proxy = proxyManualList[proxyRotateIndex % proxyManualList.length];
-  proxyRotateIndex++;
-  return proxy;
+  const total = proxyManualList.length;
+  for (let i = 0; i < total; i++) {
+    const proxy = proxyManualList[proxyRotateIndex % total];
+    proxyRotateIndex++;
+    const key = `${proxy.scheme}://${proxy.host}:${proxy.port}`;
+    if (deadSet && deadSet.has(key)) continue;
+    return proxy;
+  }
+  return null;
 }
 
 /**
@@ -484,15 +491,10 @@ async function runSessionRegistration(session) {
     let geoInfo = null;
     let pendingProxy = null;
     let fingerprint = null;
-
-    if (proxyEnabled && proxyManualList.length > 0) {
-      pendingProxy = getNextProxy();
-      session.proxy = pendingProxy;
-      console.log(`[Session ${session.id}] 代理模式: ${pendingProxy.scheme}://${pendingProxy.host}:${pendingProxy.port}，指纹将在检测代理 IP 后生成`);
-    }
+    const useProxy = proxyEnabled && proxyManualList.length > 0;
 
     // 无代理模式：直接检测 IP → 生成指纹
-    if (!pendingProxy) {
+    if (!useProxy) {
       updateSession(session.id, { step: '检测 IP 地理位置...' });
       try {
         geoInfo = await detectGeoByIp();
@@ -518,8 +520,8 @@ async function runSessionRegistration(session) {
     windowCreationLock = new Promise(resolve => { releaseLock = resolve; });
 
     try {
-      // 代理模式：先开任意页面创建无痕窗口
-      const initialUrl = pendingProxy ? 'https://ipinfo.io/json' : authInfo.verificationUriComplete;
+      // 代理模式：先开 IP 检测页创建无痕窗口
+      const initialUrl = useProxy ? 'https://ipinfo.io/json' : authInfo.verificationUriComplete;
       console.log(`[Session ${session.id}] 准备创建无痕窗口，URL:`, initialUrl);
 
       const window = await chrome.windows.create({
@@ -552,47 +554,70 @@ async function runSessionRegistration(session) {
       session.tabId = window.tabs[0].id;
       console.log(`[Session ${session.id}] 无痕窗口创建成功: windowId=${window.id}, tabId=${session.tabId}`);
 
-      // 代理模式：设置代理 → 检测代理 IP → 生成指纹 → 导航到目标
-      if (pendingProxy) {
-        updateSession(session.id, { step: '设置代理...' });
-        applyProxyToIncognito(pendingProxy);
-        console.log(`[Session ${session.id}] 代理已设置: ${pendingProxy.scheme}://${pendingProxy.host}:${pendingProxy.port}`);
+      // 代理模式：循环尝试代理，检测连通性，不通则跳过
+      if (useProxy) {
+        const deadProxies = new Set();
+        const maxAttempts = proxyManualList.length;
+        let proxyConnected = false;
 
-        // 导航到 IP 检测页（此时走代理），支持备用 API
-        updateSession(session.id, { step: '检测代理 IP 地理位置...' });
         const ipApis = [
           { url: 'https://ipinfo.io/json', parse: d => d.country ? { countryCode: d.country, timezone: d.timezone, ip: d.ip } : null },
           { url: 'https://ipwhois.app/json/', parse: d => d.country_code ? { countryCode: d.country_code, timezone: d.timezone, ip: d.ip } : null },
           { url: 'https://api.ip.sb/geoip', parse: d => d.country_code ? { countryCode: d.country_code, timezone: d.timezone, ip: d.ip } : null }
         ];
-        for (const api of ipApis) {
-          console.log(`[Session ${session.id}] 尝试 IP 检测: ${api.url}`);
-          await chrome.tabs.update(session.tabId, { url: api.url });
-          try {
-            await waitForTabLoad(session.tabId, 15000);
-            const [result] = await chrome.scripting.executeScript({
-              target: { tabId: session.tabId },
-              func: () => {
-                try { return JSON.parse(document.body.innerText); } catch (e) { return null; }
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          pendingProxy = getNextProxy(deadProxies);
+          if (!pendingProxy) break;
+
+          const proxyKey = `${pendingProxy.scheme}://${pendingProxy.host}:${pendingProxy.port}`;
+          updateSession(session.id, { step: `测试代理 (${attempt + 1}/${maxAttempts}): ${proxyKey}` });
+          console.log(`[Session ${session.id}] 测试代理 [${attempt + 1}/${maxAttempts}]: ${proxyKey}`);
+
+          applyProxyToIncognito(pendingProxy);
+
+          // 依次尝试 IP 检测 API 验证代理连通性
+          let connected = false;
+          for (const api of ipApis) {
+            try {
+              await chrome.tabs.update(session.tabId, { url: api.url });
+              await waitForTabLoad(session.tabId, 10000);
+              const [result] = await chrome.scripting.executeScript({
+                target: { tabId: session.tabId },
+                func: () => {
+                  try { return JSON.parse(document.body.innerText); } catch (e) { return null; }
+                }
+              });
+              const parsed = result?.result ? api.parse(result.result) : null;
+              if (parsed) {
+                geoInfo = parsed;
+                console.log(`[Session ${session.id}] 代理连通 [${proxyKey}]: country=${geoInfo.countryCode}, timezone=${geoInfo.timezone}, ip=${geoInfo.ip} (via ${api.url})`);
+                connected = true;
+                break;
               }
-            });
-            const parsed = result?.result ? api.parse(result.result) : null;
-            if (parsed) {
-              geoInfo = parsed;
-              console.log(`[Session ${session.id}] 代理 IP 地理位置: country=${geoInfo.countryCode}, timezone=${geoInfo.timezone}, ip=${geoInfo.ip} (via ${api.url})`);
-              break;
-            } else {
-              console.warn(`[Session ${session.id}] IP 检测返回数据无效 (${api.url}):`, result?.result);
+            } catch (e) {
+              // 该 API 失败，尝试下一个
             }
-          } catch (e) {
-            console.warn(`[Session ${session.id}] IP 检测失败 (${api.url}): ${e.message}`);
+          }
+
+          if (connected) {
+            proxyConnected = true;
+            session.proxy = pendingProxy;
+            console.log(`[Session ${session.id}] 使用代理: ${proxyKey}`);
+            break;
+          } else {
+            console.warn(`[Session ${session.id}] 代理不可用: ${proxyKey}，跳过`);
+            deadProxies.add(proxyKey);
           }
         }
-        if (!geoInfo) {
-          console.warn(`[Session ${session.id}] 所有 IP 检测 API 均失败，将使用纯随机指纹`);
+
+        if (!proxyConnected) {
+          console.warn(`[Session ${session.id}] 所有代理均不可用 (${deadProxies.size} 个)，切换为直连模式`);
+          pendingProxy = null;
+          clearIncognitoProxy();
         }
 
-        // 基于代理 IP 生成指纹
+        // 生成指纹
         updateSession(session.id, { step: '生成随机指纹...' });
         fingerprint = generateRandomFingerprint(geoInfo);
         session.fingerprint = fingerprint;
