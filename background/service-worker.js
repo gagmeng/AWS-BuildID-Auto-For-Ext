@@ -8,6 +8,7 @@ import { createProvider } from '../lib/mail-providers/index.js';
 import { DuckMailProvider } from '../lib/mail-providers/duckmail.js';
 import { AWSDeviceAuth, validateToken, refreshAndValidateToken } from '../lib/oidc-api.js';
 import { generatePassword, generateName } from '../lib/utils.js';
+import { generateRandomFingerprint, injectFingerprint } from '../lib/fingerprint.js';
 
 // 邮箱渠道配置
 let currentMailProvider = 'gmail';  // 当前选择的渠道
@@ -26,6 +27,14 @@ let gptmailApiKey = 'gpt-test';  // 默认测试 Key
 // DuckMail 配置
 let duckMailApiKey = '';  // 可选 API Key
 let duckMailDomain = '';  // 用户选择的域名
+
+// MoeMail 配置
+let moemailApiUrl = 'https://';  // API 地址
+let moemailApiKey = '';  // API Key
+let moemailDomain = '';  // 邮箱域名后缀
+let moemailPrefix = '';  // 固定前缀（可选）
+let moemailRandomLength = 5;  // 随机位数
+let moemailDuration = 0;  // 有效期（0=永久）
 
 // ============== 全局状态 ==============
 
@@ -252,19 +261,19 @@ async function withApiLock(fn) {
  */
 async function runSessionRegistration(session) {
   try {
-    session.status = 'running';
-    session.pollAbort = false;
-    updateSession(session.id, { step: '初始化...' });
-
-    // 步骤 1: 生成账号信息（先生成，用于邮箱前缀）
+    // 步骤 1: 生成账号信息
     updateSession(session.id, { step: '生成账号信息...' });
     const { firstName, lastName } = generateName();
-    const password = generatePassword(12);
+    const password = generatePassword();
+
     session.firstName = firstName;
     session.lastName = lastName;
     session.password = password;
+    session.startTime = Date.now();
 
-    // 步骤 2: 创建邮箱（根据渠道类型）
+    console.log(`[Session ${session.id}] 生成账号信息:`, { firstName, lastName });
+
+    // 步骤 2: 创建邮箱
     updateSession(session.id, { step: '创建邮箱...' });
 
     // 创建对应渠道的 provider
@@ -280,6 +289,13 @@ async function runSessionRegistration(session) {
     } else if (currentMailProvider === 'duckmail') {
       providerOptions.apiKey = duckMailApiKey;
       providerOptions.domain = duckMailDomain;
+    } else if (currentMailProvider === 'moemail') {
+      providerOptions.apiUrl = moemailApiUrl;
+      providerOptions.apiKey = moemailApiKey;
+      providerOptions.domain = moemailDomain;
+      providerOptions.prefix = moemailPrefix;
+      providerOptions.randomLength = moemailRandomLength;
+      providerOptions.duration = moemailDuration;
     }
 
     session.mailProvider = createProvider(currentMailProvider, providerOptions);
@@ -290,12 +306,8 @@ async function runSessionRegistration(session) {
       session.mailProvider.apiAuthorized = true;
     }
 
-    // 生成邮箱
-    const nameSuffix = `${firstName.toLowerCase()}${lastName.toLowerCase()}`.slice(0, 8);
-    const email = await session.mailProvider.createInbox({
-      prefix: nameSuffix,
-      mode: 'auto'
-    });
+    // 创建邮箱
+    const email = await session.mailProvider.createInbox();
     session.email = email;
     session.manualVerification = !session.mailProvider.canAutoVerify?.();
     updateSession(session.id, { email });
@@ -310,10 +322,21 @@ async function runSessionRegistration(session) {
 
     console.log(`[Session ${session.id}] OIDC 授权信息:`, authInfo.verificationUriComplete);
 
-    // 步骤 4: 打开无痕窗口（使用锁防止同时创建多个窗口）
+    // 步骤 4: 生成随机指纹
+    updateSession(session.id, { step: '生成随机指纹...' });
+    const fingerprint = generateRandomFingerprint();
+    session.fingerprint = fingerprint;
+
+    console.log(`[Session ${session.id}] 生成随机指纹:`, {
+      userAgent: fingerprint.userAgent.substring(0, 50) + '...',
+      screen: `${fingerprint.screen.width}x${fingerprint.screen.height}`,
+      timezone: fingerprint.timezone,
+      language: fingerprint.languages[0]
+    });
+
+    // 步骤 5: 打开无痕窗口（使用锁防止同时创建多个窗口）
     updateSession(session.id, { step: '打开无痕窗口...' });
 
-    // 等待获取窗口创建锁
     await windowCreationLock;
     let releaseLock;
     windowCreationLock = new Promise(resolve => { releaseLock = resolve; });
@@ -361,6 +384,21 @@ async function runSessionRegistration(session) {
         // 即使超时也继续，content script 会处理
       }
 
+      // 注入随机指纹脚本
+      updateSession(session.id, { step: '注入随机指纹...' });
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: session.tabId },
+          func: injectFingerprint,
+          args: [fingerprint],
+          world: 'MAIN'
+        });
+        console.log(`[Session ${session.id}] 随机指纹注入成功`);
+      } catch (error) {
+        console.warn(`[Session ${session.id}] 指纹注入失败:`, error.message);
+        // 指纹注入失败不影响主流程，继续执行
+      }
+
       // 额外等待一小段时间让 content script 初始化
       await new Promise(resolve => setTimeout(resolve, 1000));
 
@@ -384,7 +422,7 @@ async function runSessionRegistration(session) {
       releaseLock();
     }
 
-    // 步骤 5: 轮询 Token
+    // 步骤 6: 轮询 Token
     session.status = 'polling_token';
     updateSession(session.id, { step: '自动填表中...' });
 
@@ -998,6 +1036,77 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       })();
       return true;
 
+    case 'SET_MOEMAIL_CONFIG':
+      if (message.apiUrl !== undefined) {
+        moemailApiUrl = message.apiUrl || 'https://';
+        chrome.storage.local.set({ moemailApiUrl });
+        console.log('[Service Worker] 设置 MoeMail API URL:', moemailApiUrl);
+      }
+      if (message.apiKey !== undefined) {
+        moemailApiKey = message.apiKey || '';
+        chrome.storage.local.set({ moemailApiKey });
+        console.log('[Service Worker] 设置 MoeMail API Key');
+      }
+      if (message.domain !== undefined) {
+        moemailDomain = message.domain || '';
+        chrome.storage.local.set({ moemailDomain });
+        console.log('[Service Worker] 设置 MoeMail 域名:', moemailDomain);
+      }
+      if (message.prefix !== undefined) {
+        moemailPrefix = message.prefix || '';
+        chrome.storage.local.set({ moemailPrefix });
+        console.log('[Service Worker] 设置 MoeMail 前缀:', moemailPrefix);
+      }
+      if (message.randomLength !== undefined) {
+        moemailRandomLength = message.randomLength || 5;
+        chrome.storage.local.set({ moemailRandomLength });
+        console.log('[Service Worker] 设置 MoeMail 随机长度:', moemailRandomLength);
+      }
+      if (message.duration !== undefined) {
+        moemailDuration = message.duration || 0;
+        chrome.storage.local.set({ moemailDuration });
+        console.log('[Service Worker] 设置 MoeMail 有效期:', moemailDuration);
+      }
+      sendResponse({ success: true });
+      break;
+
+    case 'GET_MOEMAIL_DOMAINS':
+      (async () => {
+        try {
+          // 使用 MoeMailProvider 获取域名列表
+          const provider = createProvider('moemail', {
+            apiUrl: moemailApiUrl,
+            apiKey: moemailApiKey
+          });
+
+          const domains = await provider.fetchDomains();
+          sendResponse({ success: true, domains });
+        } catch (error) {
+          console.error('[Service Worker] 获取 MoeMail 域名失败:', error);
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true;
+
+    case 'TEST_MOEMAIL_CONNECTION':
+      (async () => {
+        try {
+          // 使用 MoeMailProvider 测试连接
+          const provider = createProvider('moemail', {
+            apiUrl: message.apiUrl || moemailApiUrl,
+            apiKey: message.apiKey || moemailApiKey
+          });
+
+          // 尝试获取配置来测试连接
+          await provider.fetchDomains();
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('[Service Worker] 测试 MoeMail 连接失败:', error);
+          sendResponse({ success: false, error: error.message });
+        }
+      })();
+      return true;
+
     case 'STOP_REGISTRATION':
       stopRegistration();
       sendResponse({ success: true });
@@ -1203,7 +1312,7 @@ chrome.runtime.onInstalled.addListener(() => {
 });
 
 // 恢复历史记录、Gmail API 配置和邮箱渠道
-chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSenderFilter', 'mailProvider', 'gptmailApiKey', 'duckMailApiKey', 'duckMailDomain']).then((stored) => {
+chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSenderFilter', 'mailProvider', 'gptmailApiKey', 'duckMailApiKey', 'duckMailDomain', 'moemailApiUrl', 'moemailApiKey', 'moemailDomain', 'moemailPrefix', 'moemailRandomLength', 'moemailDuration']).then((stored) => {
   if (stored.registrationHistory) {
     registrationHistory = stored.registrationHistory;
     console.log('[Service Worker] 恢复历史记录:', registrationHistory.length, '条');
@@ -1229,6 +1338,32 @@ chrome.storage.local.get(['registrationHistory', 'gmailApiAuthorized', 'gmailSen
   if (stored.duckMailDomain) {
     duckMailDomain = stored.duckMailDomain;
     console.log('[Service Worker] 恢复 DuckMail 域名:', duckMailDomain);
+  }
+
+  // 恢复 MoeMail 配置
+  if (stored.moemailApiUrl) {
+    moemailApiUrl = stored.moemailApiUrl;
+    console.log('[Service Worker] 恢复 MoeMail API URL:', moemailApiUrl);
+  }
+  if (stored.moemailApiKey) {
+    moemailApiKey = stored.moemailApiKey;
+    console.log('[Service Worker] 恢复 MoeMail API Key');
+  }
+  if (stored.moemailDomain) {
+    moemailDomain = stored.moemailDomain;
+    console.log('[Service Worker] 恢复 MoeMail 域名:', moemailDomain);
+  }
+  if (stored.moemailPrefix !== undefined) {
+    moemailPrefix = stored.moemailPrefix;
+    console.log('[Service Worker] 恢复 MoeMail 前缀:', moemailPrefix);
+  }
+  if (stored.moemailRandomLength) {
+    moemailRandomLength = stored.moemailRandomLength;
+    console.log('[Service Worker] 恢复 MoeMail 随机长度:', moemailRandomLength);
+  }
+  if (stored.moemailDuration !== undefined) {
+    moemailDuration = stored.moemailDuration;
+    console.log('[Service Worker] 恢复 MoeMail 有效期:', moemailDuration);
   }
 
   // 恢复 Gmail API 配置

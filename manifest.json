@@ -30,7 +30,9 @@
     "https://mail.chatgpt.org.uk/*",
     "https://*.chatgpt.org.uk/*",
     "https://api.duckmail.sbs/*",
-    "https://*.duckmail.sbs/*"
+    "https://*.duckmail.sbs/*",
+    "https://mail.112857.xyz/*",
+    "https://*.112857.xyz/*"
   ],
   "incognito": "spanning",
   "action": {
