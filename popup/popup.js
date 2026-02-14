@@ -1605,6 +1605,20 @@ async function init() {
   moemailSaveApiBtn.addEventListener('click', saveMoeMailApiConfig);
   moemailTestConnectionBtn.addEventListener('click', testMoeMailConnection);
   moemailRefreshDomainsBtn.addEventListener('click', loadMoeMailDomains);
+  moemailApiUrlInput.addEventListener('blur', () => {
+    const url = moemailApiUrlInput.value.trim();
+    if (url) {
+      moemailConfig.apiUrl = url;
+      chrome.runtime.sendMessage({ type: 'SET_MOEMAIL_CONFIG', apiUrl: url });
+    }
+  });
+  moemailApiKeyInput.addEventListener('blur', () => {
+    const key = moemailApiKeyInput.value.trim();
+    if (key) {
+      moemailConfig.apiKey = key;
+      chrome.runtime.sendMessage({ type: 'SET_MOEMAIL_CONFIG', apiKey: key });
+    }
+  });
   moemailApiKeyInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') {
       saveMoeMailApiConfig();
