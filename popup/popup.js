@@ -53,6 +53,37 @@ const gmailAuthStatus = document.getElementById('gmail-auth-status');
 const gmailSenderInput = document.getElementById('gmail-sender');
 const gmailSenderSaveBtn = document.getElementById('gmail-sender-save-btn');
 
+// 渠道选择元素
+const mailProviderSelect = document.getElementById('mail-provider-select');
+const gmailConfigPanel = document.getElementById('gmail-config-panel');
+const guerrillaConfigPanel = document.getElementById('guerrilla-config-panel');
+const gptmailConfigPanel = document.getElementById('gptmail-config-panel');
+
+// GPTMail 配置元素
+const gptmailApiKeyInput = document.getElementById('gptmail-apikey');
+const gptmailSaveBtn = document.getElementById('gptmail-save-btn');
+
+// DuckMail 配置元素
+const duckMailConfigPanel = document.getElementById('duckmail-config-panel');
+const duckMailApiKeyInput = document.getElementById('duckmail-apikey');
+const duckMailApiKeySaveBtn = document.getElementById('duckmail-apikey-save-btn');
+const duckMailDomainSelect = document.getElementById('duckmail-domain-select');
+const duckMailRefreshDomainsBtn = document.getElementById('duckmail-refresh-domains-btn');
+
+// MoeMail 配置元素
+const moemailConfigPanel = document.getElementById('moemail-config-panel');
+const moemailApiUrlInput = document.getElementById('moemail-api-url');
+const moemailApiKeyInput = document.getElementById('moemail-api-key');
+const moemailSaveApiBtn = document.getElementById('moemail-save-api-btn');
+const moemailTestConnectionBtn = document.getElementById('moemail-test-connection-btn');
+const moemailDurationSelect = document.getElementById('moemail-duration-select');
+const moemailDomainSelect = document.getElementById('moemail-domain-select');
+const moemailRefreshDomainsBtn = document.getElementById('moemail-refresh-domains-btn');
+const moemailPrefixInput = document.getElementById('moemail-prefix');
+const moemailRandomLengthInput = document.getElementById('moemail-random-length');
+const moemailPreviewText = document.getElementById('moemail-preview-text');
+const moemailStatus = document.getElementById('moemail-status');
+
 // Token Pool 元素
 const poolApiKeyInput = document.getElementById('pool-api-key');
 const poolConnectBtn = document.getElementById('pool-connect-btn');
@@ -65,6 +96,9 @@ const poolPoints = document.getElementById('pool-points');
 
 // Gmail 配置
 let gmailAddress = '';
+
+// 当前选择的邮箱渠道
+let currentProvider = 'gmail';
 
 // Token Pool 配置
 const POOL_API_URL = 'http://localhost:8080';
@@ -298,7 +332,9 @@ function renderHistory(history) {
       <div class="history-time">${item.time || ''}</div>
       <div class="history-actions">
         ${item.success && item.token ? `<button class="kiro-btn" data-id="${item.id}" title="同步至 Kiro IDE">Kiro</button>` : ''}
+        ${item.success && item.token ? `<button class="copy-json-btn" data-id="${item.id}" title="复制为 JSON">JSON</button>` : ''}
         <button class="copy-btn-record" data-id="${item.id}">复制</button>
+        <button class="delete-btn-record" data-id="${item.id}" title="删除此记录">&#x2715;</button>
       </div>
     </div>
   `;
@@ -331,10 +367,26 @@ historyList.addEventListener('click', async (e) => {
     await syncToKiro(id);
   }
 
+  // JSON 复制按钮
+  if (target.classList.contains('copy-json-btn')) {
+    const id = target.getAttribute('data-id');
+    await copyRecordJson(id);
+  }
+
   // 复制按钮
   if (target.classList.contains('copy-btn-record')) {
     const id = target.getAttribute('data-id');
     await copyRecord(id);
+  }
+
+  // 删除按钮
+  if (target.classList.contains('delete-btn-record')) {
+    const id = target.getAttribute('data-id');
+    await chrome.runtime.sendMessage({ type: 'DELETE_HISTORY_ITEM', id });
+    target.closest('.history-item').remove();
+    if (historyList.children.length === 0) {
+      historyList.innerHTML = '<div class="history-empty">暂无记录</div>';
+    }
   }
 });
 
@@ -412,19 +464,22 @@ async function syncToKiro(id) {
 
     if (os === 'windows') {
       // Windows PowerShell 命令
-      // 转义 JSON 中的特殊字符用于 PowerShell
-      const authTokenEscaped = authToken.replace(/'/g, "''");
-      const clientInfoEscaped = clientInfo.replace(/'/g, "''");
+      // 使用 .NET 方法写入无 BOM 的 UTF-8 文件，避免编码问题
+      const authTokenEscaped = authToken.replace(/`/g, '``').replace(/\$/g, '`$');
+      const clientInfoEscaped = clientInfo.replace(/`/g, '``').replace(/\$/g, '`$');
       
       command = `$ssoDir = "$env:USERPROFILE\\.aws\\sso\\cache"
 if (!(Test-Path $ssoDir)) { New-Item -ItemType Directory -Force -Path $ssoDir | Out-Null }
-@'
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$authToken = @"
 ${authTokenEscaped}
-'@ | Out-File -FilePath "$ssoDir\\kiro-auth-token.json" -Encoding UTF8 -NoNewline
-@'
+"@
+$clientInfo = @"
 ${clientInfoEscaped}
-'@ | Out-File -FilePath "$ssoDir\\${clientIdHash}.json" -Encoding UTF8 -NoNewline
-Write-Host "已同步至 Kiro IDE" -ForegroundColor Green`;
+"@
+[System.IO.File]::WriteAllText("$ssoDir\\kiro-auth-token.json", $authToken, $utf8NoBom)
+[System.IO.File]::WriteAllText("$ssoDir\\${clientIdHash}.json", $clientInfo, $utf8NoBom)
+Write-Host "已同步至 Kiro IDE (UTF-8 无 BOM)" -ForegroundColor Green`;
       terminalName = 'PowerShell';
     } else {
       // macOS / Linux bash 命令
@@ -442,6 +497,24 @@ echo "已同步至 Kiro IDE"`;
     alert(`检测到 ${os === 'windows' ? 'Windows' : os === 'macos' ? 'macOS' : 'Linux'} 系统\n命令已复制到剪贴板\n\n请在 ${terminalName} 中粘贴执行`);
   } catch (err) {
     alert('同步失败: ' + err.message);
+  }
+}
+
+/**
+ * 复制记录为 JSON
+ */
+async function copyRecordJson(id) {
+  const response = await chrome.runtime.sendMessage({ type: 'EXPORT_HISTORY' });
+  const record = response.history?.find(r => String(r.id) === String(id));
+  if (record?.token) {
+    const json = JSON.stringify({
+      clientId: record.token.clientId || '',
+      clientSecret: record.token.clientSecret || '',
+      accessToken: record.token.accessToken || '',
+      refreshToken: record.token.refreshToken || ''
+    }, null, 2);
+    await navigator.clipboard.writeText(json);
+    alert('JSON 已复制到剪贴板');
   }
 }
 
@@ -483,11 +556,18 @@ async function startRegistration() {
   const loopCount = parseInt(loopCountInput.value) || 1;
   const concurrency = parseInt(concurrencyInput.value) || 1;
 
-  // 检查 Gmail 是否已配置
-  if (!gmailAddress) {
-    alert('请先配置 Gmail 地址');
-    gmailAddressInput.focus();
-    return;
+  // 根据渠道类型检查配置
+  if (currentProvider === 'gmail') {
+    if (!gmailAddress) {
+      alert('请先配置 Gmail 地址');
+      gmailAddressInput.focus();
+      return;
+    }
+  } else if (currentProvider === 'duckmail') {
+    if (!duckMailDomainSelect.value) {
+      alert('请先选择 DuckMail 域名');
+      return;
+    }
   }
 
   // 验证输入
@@ -501,7 +581,7 @@ async function startRegistration() {
   }
 
   // Gmail 别名模式建议并发为 1
-  if (concurrency > 1) {
+  if (currentProvider === 'gmail' && concurrency > 1) {
     const confirm = window.confirm('使用 Gmail 别名模式时，建议并发设为 1（需要手动输入验证码）。\n\n是否继续？');
     if (!confirm) return;
   }
@@ -513,7 +593,8 @@ async function startRegistration() {
       type: 'START_BATCH_REGISTRATION',
       loopCount,
       concurrency,
-      gmailAddress  // 传递 Gmail 地址
+      provider: currentProvider,
+      gmailAddress: currentProvider === 'gmail' ? gmailAddress : ''
     });
     console.log('[Popup] 注册响应:', response);
 
@@ -799,6 +880,73 @@ async function validateAllTokens() {
 // ==================== Gmail 配置功能 ====================
 
 /**
+ * 切换渠道配置面板显示
+ */
+function switchProviderPanel(providerId) {
+  // 隐藏所有面板
+  gmailConfigPanel.style.display = 'none';
+  guerrillaConfigPanel.style.display = 'none';
+  gptmailConfigPanel.style.display = 'none';
+  duckMailConfigPanel.style.display = 'none';
+  moemailConfigPanel.style.display = 'none';
+
+  // 显示对应面板
+  switch (providerId) {
+    case 'gmail':
+      gmailConfigPanel.style.display = 'flex';
+      break;
+    case 'guerrilla':
+      guerrillaConfigPanel.style.display = 'block';
+      break;
+    case 'gptmail':
+      gptmailConfigPanel.style.display = 'block';
+      break;
+    case 'duckmail':
+      duckMailConfigPanel.style.display = 'block';
+      loadDuckMailDomains();  // 切换到 DuckMail 时加载域名
+      break;
+    case 'moemail':
+      moemailConfigPanel.style.display = 'block';
+      loadMoeMailConfig();  // 切换到 MoeMail 时加载配置
+      break;
+  }
+}
+
+/**
+ * 加载邮箱渠道配置
+ */
+async function loadProviderConfig() {
+  try {
+    const result = await chrome.storage.local.get(['mailProvider']);
+    if (result.mailProvider) {
+      currentProvider = result.mailProvider;
+      mailProviderSelect.value = currentProvider;
+    }
+    switchProviderPanel(currentProvider);
+  } catch (error) {
+    console.error('[Provider] 加载配置错误:', error);
+  }
+}
+
+/**
+ * 保存邮箱渠道配置
+ */
+async function saveProviderConfig(providerId) {
+  try {
+    currentProvider = providerId;
+    await chrome.storage.local.set({ mailProvider: providerId });
+    // 通知 service worker 切换渠道
+    await chrome.runtime.sendMessage({
+      type: 'SET_MAIL_PROVIDER',
+      provider: providerId
+    });
+    console.log('[Provider] 已切换到:', providerId);
+  } catch (error) {
+    console.error('[Provider] 保存配置错误:', error);
+  }
+}
+
+/**
  * 加载 Gmail 配置
  */
 async function loadGmailConfig() {
@@ -950,6 +1098,393 @@ async function saveGmailSender() {
 }
 
 // ==================== Token Pool 功能 ====================
+
+// ==================== GPTMail 配置功能 ====================
+
+/**
+ * 加载 GPTMail 配置
+ */
+async function loadGptmailConfig() {
+  try {
+    const result = await chrome.storage.local.get(['gptmailApiKey']);
+    if (result.gptmailApiKey) {
+      gptmailApiKeyInput.value = result.gptmailApiKey;
+    }
+  } catch (error) {
+    console.error('[GPTMail] 加载配置错误:', error);
+  }
+}
+
+/**
+ * 保存 GPTMail 配置
+ */
+async function saveGptmailConfig() {
+  const apiKey = gptmailApiKeyInput.value.trim() || 'gpt-test';
+
+  try {
+    await chrome.storage.local.set({ gptmailApiKey: apiKey });
+    // 通知 service worker
+    await chrome.runtime.sendMessage({
+      type: 'SET_GPTMAIL_APIKEY',
+      apiKey: apiKey
+    });
+
+    // 显示保存成功提示
+    gptmailSaveBtn.textContent = '已保存';
+    setTimeout(() => {
+      gptmailSaveBtn.textContent = '保存';
+    }, 1500);
+
+    console.log('[GPTMail] API Key 已保存');
+  } catch (error) {
+    console.error('[GPTMail] 保存配置错误:', error);
+    alert('保存失败: ' + error.message);
+  }
+}
+
+// ==================== Token Pool 功能（原位置） ====================
+
+// ==================== DuckMail 配置功能 ====================
+
+/**
+ * 加载 DuckMail 配置
+ */
+async function loadDuckMailConfig() {
+  try {
+    const result = await chrome.storage.local.get(['duckMailApiKey', 'duckMailDomain']);
+    if (result.duckMailApiKey) {
+      duckMailApiKeyInput.value = result.duckMailApiKey;
+    }
+    if (result.duckMailDomain) {
+      // 域名列表加载后会自动选中
+      duckMailDomainSelect._savedDomain = result.duckMailDomain;
+    }
+  } catch (error) {
+    console.error('[DuckMail] 加载配置错误:', error);
+  }
+}
+
+/**
+ * 保存 DuckMail API Key
+ */
+async function saveDuckMailApiKey() {
+  const apiKey = duckMailApiKeyInput.value.trim();
+
+  try {
+    await chrome.storage.local.set({ duckMailApiKey: apiKey });
+    await chrome.runtime.sendMessage({
+      type: 'SET_DUCKMAIL_CONFIG',
+      apiKey: apiKey
+    });
+
+    duckMailApiKeySaveBtn.textContent = '已保存';
+    setTimeout(() => { duckMailApiKeySaveBtn.textContent = '保存'; }, 1500);
+
+    console.log('[DuckMail] API Key 已保存');
+    // 保存后刷新域名列表（可能有私有域名）
+    await loadDuckMailDomains();
+  } catch (error) {
+    console.error('[DuckMail] 保存 API Key 错误:', error);
+    alert('保存失败: ' + error.message);
+  }
+}
+
+/**
+ * 加载 DuckMail 域名列表
+ */
+async function loadDuckMailDomains() {
+  duckMailDomainSelect.innerHTML = '<option value="">加载域名中...</option>';
+  duckMailDomainSelect.disabled = true;
+
+  try {
+    const response = await chrome.runtime.sendMessage({ type: 'GET_DUCKMAIL_DOMAINS' });
+
+    if (!response.success) {
+      throw new Error(response.error || '获取域名失败');
+    }
+
+    const domains = response.domains || [];
+    const savedDomain = duckMailDomainSelect._savedDomain ||
+      (await chrome.storage.local.get(['duckMailDomain'])).duckMailDomain || '';
+
+    duckMailDomainSelect.innerHTML = domains.map(d =>
+      `<option value="${d}" ${d === savedDomain ? 'selected' : ''}>${d}</option>`
+    ).join('');
+
+    // 如果没有保存的域名，默认选第一个并保存
+    if (!savedDomain && domains.length > 0) {
+      saveDuckMailDomain(domains[0]);
+    } else if (savedDomain) {
+      saveDuckMailDomain(savedDomain);
+    }
+
+  } catch (error) {
+    console.error('[DuckMail] 加载域名失败:', error);
+    duckMailDomainSelect.innerHTML = '<option value="">加载失败，点击刷新</option>';
+  } finally {
+    duckMailDomainSelect.disabled = false;
+  }
+}
+
+// ==================== MoeMail 配置功能 ====================
+
+/**
+ * MoeMail 配置状态
+ */
+let moemailConfig = {
+  apiUrl: 'https://',
+  apiKey: '',
+  domain: '',
+  prefix: '',
+  randomLength: 5,
+  duration: 0,
+  isConnected: false
+};
+
+/**
+ * 加载 MoeMail 配置
+ */
+async function loadMoeMailConfig() {
+  try {
+    const result = await chrome.storage.local.get(['moemailApiUrl', 'moemailApiKey', 'moemailDomain', 'moemailPrefix', 'moemailRandomLength', 'moemailDuration']);
+    
+    if (result.moemailApiUrl) {
+      moemailConfig.apiUrl = result.moemailApiUrl;
+      moemailApiUrlInput.value = result.moemailApiUrl;
+    }
+    if (result.moemailApiKey) {
+      moemailConfig.apiKey = result.moemailApiKey;
+      moemailApiKeyInput.value = result.moemailApiKey;
+    }
+    if (result.moemailDomain) {
+      moemailConfig.domain = result.moemailDomain;
+    }
+    if (result.moemailPrefix !== undefined) {
+      moemailConfig.prefix = result.moemailPrefix;
+      moemailPrefixInput.value = result.moemailPrefix;
+    }
+    if (result.moemailRandomLength) {
+      moemailConfig.randomLength = result.moemailRandomLength;
+      moemailRandomLengthInput.value = result.moemailRandomLength;
+    }
+    if (result.moemailDuration !== undefined) {
+      moemailConfig.duration = result.moemailDuration;
+      moemailDurationSelect.value = result.moemailDuration;
+    }
+
+    // 如果有 API Key，自动测试连接
+    if (moemailConfig.apiKey) {
+      await testMoeMailConnection();
+    }
+  } catch (error) {
+    console.error('[MoeMail] 加载配置错误:', error);
+  }
+}
+
+/**
+ * 保存 MoeMail API 配置
+ */
+async function saveMoeMailApiConfig() {
+  const apiUrl = moemailApiUrlInput.value.trim();
+  const apiKey = moemailApiKeyInput.value.trim();
+  
+  if (!apiUrl || !apiKey) {
+    showMoeMailStatus('请填写完整的 API 配置', 'error');
+    return;
+  }
+  
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SET_MOEMAIL_CONFIG',
+      apiUrl: apiUrl,
+      apiKey: apiKey
+    });
+    
+    moemailConfig.apiUrl = apiUrl;
+    moemailConfig.apiKey = apiKey;
+    
+    showMoeMailStatus('API 配置已保存', 'success');
+    
+    // 自动测试连接
+    await testMoeMailConnection();
+  } catch (error) {
+    console.error('[MoeMail] 保存配置错误:', error);
+    showMoeMailStatus('保存失败: ' + error.message, 'error');
+  }
+}
+
+/**
+ * 测试 MoeMail API 连接
+ */
+async function testMoeMailConnection() {
+  if (!moemailConfig.apiKey) {
+    showMoeMailStatus('请先配置 API Key', 'error');
+    return;
+  }
+  
+  moemailTestConnectionBtn.disabled = true;
+  moemailTestConnectionBtn.textContent = '测试中...';
+  
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'TEST_MOEMAIL_CONNECTION',
+      apiUrl: moemailConfig.apiUrl,
+      apiKey: moemailConfig.apiKey
+    });
+    
+    if (response.success) {
+      moemailConfig.isConnected = true;
+      showMoeMailStatus('✓ API 连接成功', 'success');
+      
+      // 加载域名列表
+      await loadMoeMailDomains();
+    } else {
+      moemailConfig.isConnected = false;
+      showMoeMailStatus('连接失败: ' + response.error, 'error');
+    }
+  } catch (error) {
+    console.error('[MoeMail] 测试连接错误:', error);
+    moemailConfig.isConnected = false;
+    showMoeMailStatus('连接失败: ' + error.message, 'error');
+  } finally {
+    moemailTestConnectionBtn.disabled = false;
+    moemailTestConnectionBtn.textContent = '测试';
+  }
+}
+
+/**
+ * 加载 MoeMail 域名列表
+ */
+async function loadMoeMailDomains() {
+  if (!moemailConfig.isConnected) {
+    return;
+  }
+  
+  moemailDomainSelect.innerHTML = '<option value="">加载域名中...</option>';
+  moemailRefreshDomainsBtn.disabled = true;
+  
+  try {
+    const response = await chrome.runtime.sendMessage({
+      type: 'GET_MOEMAIL_DOMAINS'
+    });
+    
+    if (response.success && response.domains) {
+      moemailDomainSelect.innerHTML = '';
+      
+      response.domains.forEach(domain => {
+        const option = document.createElement('option');
+        option.value = domain;
+        option.textContent = '@' + domain;
+        moemailDomainSelect.appendChild(option);
+      });
+      
+      // 恢复之前选择的域名
+      if (moemailConfig.domain) {
+        moemailDomainSelect.value = moemailConfig.domain;
+      } else if (response.domains.length > 0) {
+        moemailDomainSelect.value = response.domains[0];
+        moemailConfig.domain = response.domains[0];
+      }
+      
+      updateMoeMailPreview();
+    } else {
+      moemailDomainSelect.innerHTML = '<option value="">加载失败</option>';
+      showMoeMailStatus('域名加载失败: ' + response.error, 'error');
+    }
+  } catch (error) {
+    console.error('[MoeMail] 加载域名错误:', error);
+    moemailDomainSelect.innerHTML = '<option value="">加载失败</option>';
+    showMoeMailStatus('域名加载失败: ' + error.message, 'error');
+  } finally {
+    moemailRefreshDomainsBtn.disabled = false;
+  }
+}
+
+/**
+ * 保存 MoeMail 配置
+ */
+async function saveMoeMailConfig(config) {
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'SET_MOEMAIL_CONFIG',
+      ...config
+    });
+    
+    // 更新本地配置
+    Object.assign(moemailConfig, config);
+  } catch (error) {
+    console.error('[MoeMail] 保存配置错误:', error);
+  }
+}
+
+/**
+ * 更新邮箱预览
+ */
+function updateMoeMailPreview() {
+  const domain = moemailDomainSelect.value;
+  const prefix = moemailPrefixInput.value.trim();
+  const randomLength = parseInt(moemailRandomLengthInput.value) || 5;
+  
+  if (!domain) {
+    moemailPreviewText.textContent = '请先选择域名';
+    moemailPreviewText.style.color = '#999';
+    return;
+  }
+  
+  // 生成随机字符串示例
+  const randomStr = generateRandomString(randomLength);
+  const username = prefix ? `${prefix}${randomStr}` : randomStr;
+  const email = `${username}@${domain}`;
+  
+  moemailPreviewText.textContent = email;
+  moemailPreviewText.style.color = '#232f3e';
+}
+
+/**
+ * 生成随机字符串
+ */
+function generateRandomString(length) {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let result = '';
+  for (let i = 0; i < length; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+/**
+ * 显示 MoeMail 状态提示
+ */
+function showMoeMailStatus(message, type = 'info') {
+  moemailStatus.textContent = message;
+  moemailStatus.className = `provider-desc ${type}`;
+  moemailStatus.style.display = 'block';
+  
+  // 3秒后自动隐藏成功提示
+  if (type === 'success') {
+    setTimeout(() => {
+      moemailStatus.style.display = 'none';
+    }, 3000);
+  }
+}
+
+/**
+ * 保存 DuckMail 域名选择
+ */
+async function saveDuckMailDomain(domain) {
+  try {
+    await chrome.storage.local.set({ duckMailDomain: domain });
+    await chrome.runtime.sendMessage({
+      type: 'SET_DUCKMAIL_CONFIG',
+      domain: domain
+    });
+    console.log('[DuckMail] 域名已保存:', domain);
+  } catch (error) {
+    console.error('[DuckMail] 保存域名错误:', error);
+  }
+}
+
+// ==================== Token Pool 功能（继续） ====================
 
 /**
  * 加载 Token Pool 配置
@@ -1137,11 +1672,20 @@ async function init() {
     console.error('[Popup] 获取状态错误:', error);
   }
 
+  // 加载邮箱渠道配置
+  await loadProviderConfig();
+
   // 加载 Gmail 配置
   await loadGmailConfig();
 
   // 加载 Gmail API 配置
   await loadGmailApiConfig();
+
+  // 加载 GPTMail 配置
+  await loadGptmailConfig();
+
+  // 加载 DuckMail 配置
+  await loadDuckMailConfig();
 
   // 加载 Token Pool 配置
   await loadPoolConfig();
@@ -1178,6 +1722,13 @@ async function init() {
   clearBtn.addEventListener('click', clearHistory);
   validateBtn.addEventListener('click', validateAllTokens);
 
+  // 渠道选择事件
+  mailProviderSelect.addEventListener('change', (e) => {
+    const providerId = e.target.value;
+    switchProviderPanel(providerId);
+    saveProviderConfig(providerId);
+  });
+
   // Gmail 配置事件
   gmailSaveBtn.addEventListener('click', saveGmailConfig);
   gmailAddressInput.addEventListener('keypress', (e) => {
@@ -1190,10 +1741,182 @@ async function init() {
   gmailAuthBtn.addEventListener('click', authorizeGmailApi);
   gmailSenderSaveBtn.addEventListener('click', saveGmailSender);
 
+  // GPTMail 配置事件
+  gptmailSaveBtn.addEventListener('click', saveGptmailConfig);
+  gptmailApiKeyInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      saveGptmailConfig();
+    }
+  });
+
+  // DuckMail 配置事件
+  duckMailApiKeySaveBtn.addEventListener('click', saveDuckMailApiKey);
+  duckMailApiKeyInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      saveDuckMailApiKey();
+    }
+  });
+  duckMailDomainSelect.addEventListener('change', (e) => {
+    saveDuckMailDomain(e.target.value);
+  });
+  duckMailRefreshDomainsBtn.addEventListener('click', loadDuckMailDomains);
+
+  // MoeMail 配置事件
+  moemailSaveApiBtn.addEventListener('click', saveMoeMailApiConfig);
+  moemailTestConnectionBtn.addEventListener('click', testMoeMailConnection);
+  moemailRefreshDomainsBtn.addEventListener('click', loadMoeMailDomains);
+  moemailApiUrlInput.addEventListener('blur', () => {
+    const url = moemailApiUrlInput.value.trim();
+    if (url) {
+      moemailConfig.apiUrl = url;
+      chrome.runtime.sendMessage({ type: 'SET_MOEMAIL_CONFIG', apiUrl: url });
+    }
+  });
+  moemailApiKeyInput.addEventListener('blur', () => {
+    const key = moemailApiKeyInput.value.trim();
+    if (key) {
+      moemailConfig.apiKey = key;
+      chrome.runtime.sendMessage({ type: 'SET_MOEMAIL_CONFIG', apiKey: key });
+    }
+  });
+  moemailApiKeyInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      saveMoeMailApiConfig();
+    }
+  });
+  moemailDomainSelect.addEventListener('change', (e) => {
+    saveMoeMailConfig({ domain: e.target.value });
+    updateMoeMailPreview();
+  });
+  moemailPrefixInput.addEventListener('input', (e) => {
+    saveMoeMailConfig({ prefix: e.target.value });
+    updateMoeMailPreview();
+  });
+  moemailRandomLengthInput.addEventListener('input', (e) => {
+    saveMoeMailConfig({ randomLength: parseInt(e.target.value) || 5 });
+    updateMoeMailPreview();
+  });
+  moemailDurationSelect.addEventListener('change', (e) => {
+    saveMoeMailConfig({ duration: parseInt(e.target.value) });
+  });
+
   // Token Pool 事件
   poolConnectBtn.addEventListener('click', connectToPool);
   poolDisconnectBtn.addEventListener('click', disconnectFromPool);
   poolUploadBtn.addEventListener('click', uploadToPool);
+
+  // 授权页拒绝开关
+  const denyAccessToggle = document.getElementById('deny-access-toggle');
+  chrome.runtime.sendMessage({ type: 'GET_DENY_ACCESS' }).then(res => {
+    if (res) denyAccessToggle.checked = res.denyAccess;
+  }).catch(() => {});
+  denyAccessToggle.addEventListener('change', () => {
+    chrome.runtime.sendMessage({ type: 'SET_DENY_ACCESS', value: denyAccessToggle.checked });
+  });
+
+  // 代理配置
+  const proxyEnabledToggle = document.getElementById('proxy-enabled-toggle');
+  const proxyConfigPanel = document.getElementById('proxy-config-panel');
+  const proxyManualListInput = document.getElementById('proxy-manual-list');
+  const proxyParsedCount = document.getElementById('proxy-parsed-count');
+  const proxyApiUrlInput = document.getElementById('proxy-api-url');
+  const proxyApiKeyInput = document.getElementById('proxy-api-key');
+  const proxyTestBtn = document.getElementById('proxy-test-btn');
+  const proxyStatus = document.getElementById('proxy-status');
+  const proxyUsageLimitInput = document.getElementById('proxy-usage-limit');
+
+  chrome.runtime.sendMessage({ type: 'GET_PROXY_CONFIG' }).then(res => {
+    if (res) {
+      proxyEnabledToggle.checked = res.proxyEnabled;
+      proxyApiUrlInput.value = res.proxyApiUrl || '';
+      proxyApiKeyInput.value = res.proxyApiKey || '';
+      proxyManualListInput.value = res.proxyManualRaw || '';
+      proxyConfigPanel.style.display = res.proxyEnabled ? 'block' : 'none';
+      proxyUsageLimitInput.value = res.proxyUsageLimit || 1;
+      if (res.deadProxies) renderDeadProxies(res.deadProxies);
+      if (res.parsedCount > 0) {
+        proxyParsedCount.textContent = `已解析 ${res.parsedCount} 个代理`;
+        proxyParsedCount.style.color = 'green';
+      }
+    }
+  }).catch(() => {});
+
+  proxyEnabledToggle.addEventListener('change', () => {
+    const enabled = proxyEnabledToggle.checked;
+    proxyConfigPanel.style.display = enabled ? 'block' : 'none';
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', enabled });
+  });
+
+  proxyManualListInput.addEventListener('blur', async () => {
+    const res = await chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', manualRaw: proxyManualListInput.value });
+    if (res?.parsedCount !== undefined) {
+      proxyParsedCount.textContent = res.parsedCount > 0 ? `已解析 ${res.parsedCount} 个代理` : '未检测到有效代理';
+      proxyParsedCount.style.color = res.parsedCount > 0 ? 'green' : 'red';
+    }
+  });
+
+  proxyApiUrlInput.addEventListener('blur', () => {
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', apiUrl: proxyApiUrlInput.value });
+  });
+  proxyApiKeyInput.addEventListener('blur', () => {
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', apiKey: proxyApiKeyInput.value });
+  });
+  proxyUsageLimitInput.addEventListener('change', () => {
+    chrome.runtime.sendMessage({ type: 'SET_PROXY_CONFIG', usageLimit: parseInt(proxyUsageLimitInput.value) || 1 });
+  });
+
+  proxyTestBtn.addEventListener('click', async () => {
+    proxyStatus.textContent = '测试中...';
+    proxyStatus.style.color = '#666';
+    try {
+      const res = await chrome.runtime.sendMessage({
+        type: 'TEST_PROXY_API',
+        apiUrl: proxyApiUrlInput.value,
+        apiKey: proxyApiKeyInput.value
+      });
+      if (res?.success) {
+        proxyStatus.textContent = '连接成功: ' + (typeof res.data === 'string' ? res.data.substring(0, 50) : JSON.stringify(res.data).substring(0, 50));
+        proxyStatus.style.color = 'green';
+      } else {
+        proxyStatus.textContent = '失败: ' + (res?.error || '未知错误');
+        proxyStatus.style.color = 'red';
+      }
+    } catch (e) {
+      proxyStatus.textContent = '失败: ' + e.message;
+      proxyStatus.style.color = 'red';
+    }
+  });
+
+  // 不可用代理管理
+  const proxyDeadSection = document.getElementById('proxy-dead-section');
+  const proxyDeadCount = document.getElementById('proxy-dead-count');
+  const proxyDeadList = document.getElementById('proxy-dead-list');
+  const proxyClearDeadBtn = document.getElementById('proxy-clear-dead-btn');
+
+  function renderDeadProxies(deadList) {
+    if (!deadList || deadList.length === 0) {
+      proxyDeadSection.style.display = 'none';
+      return;
+    }
+    proxyDeadSection.style.display = 'block';
+    proxyDeadCount.textContent = `${deadList.length} 个代理不可用`;
+    proxyDeadList.innerHTML = deadList.map(key =>
+      `<div class="proxy-dead-item"><span title="${key}">${key}</span><button data-key="${key}" title="恢复此代理">&#x2713;</button></div>`
+    ).join('');
+  }
+
+  proxyDeadList.addEventListener('click', async (e) => {
+    if (e.target.tagName === 'BUTTON') {
+      const key = e.target.getAttribute('data-key');
+      const res = await chrome.runtime.sendMessage({ type: 'REVIVE_PROXY', proxyKey: key });
+      if (res?.deadProxies) renderDeadProxies(res.deadProxies);
+    }
+  });
+
+  proxyClearDeadBtn.addEventListener('click', async () => {
+    await chrome.runtime.sendMessage({ type: 'CLEAR_DEAD_PROXIES' });
+    renderDeadProxies([]);
+  });
 
   // 绑定复制按钮事件
   document.querySelectorAll('.copy-btn').forEach(btn => {

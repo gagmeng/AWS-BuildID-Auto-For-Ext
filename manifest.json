@@ -9,7 +9,9 @@
     "storage",
     "tabs",
     "windows",
-    "identity"
+    "identity",
+    "offscreen",
+    "proxy"
   ],
   "oauth2": {
     "client_id": "908750461248-ejpp8fstcup80r20reljitu5d3pi2b73.apps.googleusercontent.com",
@@ -23,7 +25,18 @@
     "https://signin.aws.amazon.com/*",
     "https://*.amazonaws.com/*",
     "https://mailfly.codeforge.top/*",
-    "https://view.awsapps.com/*"
+    "https://view.awsapps.com/*",
+    "https://api.guerrillamail.com/*",
+    "http://api.guerrillamail.com/*",
+    "https://mail.chatgpt.org.uk/*",
+    "https://*.chatgpt.org.uk/*",
+    "https://api.duckmail.sbs/*",
+    "https://*.duckmail.sbs/*",
+    "https://mail.112857.xyz/*",
+    "https://*.112857.xyz/*",
+    "https://ipinfo.io/*",
+    "https://ipwhois.app/*",
+    "https://api.ip.sb/*"
   ],
   "incognito": "spanning",
   "action": {
